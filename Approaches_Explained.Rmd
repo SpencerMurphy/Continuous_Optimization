@@ -1,0 +1,238 @@
+---
+title: "TS_Analysis"
+author: "Spencer Murphy"
+date: "12/3/2020"
+output: html_document
+---
+
+
+We'll cash the chunks to save time on Knitting:
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+
+Part 1: Data Ingestion and Setup
+-------------------------------------------------------------------------------
+
+We can do this directly from excel, but this is after opening the excel file, File > Save As > .txt
+
+```{r}
+library(forecast)
+
+
+setwd("C:/Users/murph/DSTI/Time Series Analysis/exam")
+df <- read.table("Elec-train.txt", sep='\t', header = TRUE, fileEncoding = "UTF-16LE")
+head(df)
+df[4507,]
+```
+
+Let's turn that dataframe into a timeseries (without frequency for now):
+
+```{r}
+dfts <- ts(data=df)
+dim(dfts)
+dfts[4507,] # last complete row
+dfts[4508,]
+
+head(dfts[,1])
+head(dfts[,2])
+head(dfts[,3])
+
+```
+
+this is a timeseries for all the data, with the timestamps as obs in row dfts[,1]
+
+What we need is a training set and a testing set. Since we know our validation is 1 day into the future (96 observations). we'll pull out the last 96 observations as a test set and use the rest as the training set.
+
+```{r}
+elecdata <- ts(data=df) # this gives us all the data, as a time series and with the frequency
+powerdata <- na.omit(elecdata)
+powertrain <- ts(powerdata[c(1:4411),])
+powertest <- ts(powerdata[c(4412:4507),])
+dim(powertrain)
+dim(powertest)
+#powertrain <- window(elecdaily, start=powerdaily[])
+```
+OK great, we have 'powertrain' to train our data, and 'powertest' to see how close our predictions are to the known values.
+
+Part 2: Prediction from previous power usage only
+-------------------------------------------------------------------------------
+
+Our first analysis and prediction will not factor in the Temperature
+
+We'll start with a linear fit of the Power usage over the training period:
+
+```{r}
+linearFit = lm(powertrain[,2] ~ powertrain[,1])
+plot(powertrain[,2])
+abline(linearFit,col='red')
+```
+
+we see a slight downward trend. Let's see how it looks against the test data:
+
+```{r}
+plot(powertest[,2])
+abline(linearFit,col='red')
+```
+OK, but obviously not a great approximation. Even the downward trend is lost here (at least visually).
+
+Next we can try simple exponential smoothing:
+
+```{r}
+dfses = ses(dfts[,2], h=96)
+round(accuracy(dfses), 2)
+autoplot(dfses)
+```
+This assumes a continuation of the current value (not much better than the linear fit), and a HUGE range which intuitively we already knew. 
+
+Now we'll try Holt-Winters, but remember we haven't added seasonality to the time series yet.
+
+```{r}
+dfes=HoltWinters(powertrain[,2], alpha=NULL, beta=FALSE, gamma=FALSE)
+plot(powertrain[,2])
+pdfes <- predict(dfes, n.ahead=95) # trying to add ,prediction.interval = TRUE
+lines(pdfes,col='red')
+```
+
+As we might have expected, that's not very good. Let's try adding the frequency (96 intervals of 15min in each day), and then performing a Holt-Winters analysis instead:
+
+```{r}
+elecDaily <- ts(data=df, frequency = 96) # this gives us all the data, as a time series and with the frequency
+powerDaily <- na.omit(elecDaily[,2]) # this omits the rows missing temperature data
+head(powerDaily)
+dim(powerDaily)
+powerTrainDaily <- window(powerDaily, start = c(1,1), end = c(46,91))# this creates our training set
+
+powerTestDaily <- window(powerDaily, start = c(46,92), end = NULL)    # and this creates our test set
+
+powerTD.hw=HoltWinters(powerTrainDaily,beta=NULL,gamma=NULL)
+plot(powerTrainDaily)
+p<-predict(powerTD.hw,n.ahead=96)
+lines(powerTestDaily, col=4)
+lines(p,col=2)
+
+
+```
+This gives us an actual (in blue) along with a predicted (in red) that's really quite good!
+
+The data doesn't look multiplicative to me, but let's give that a try as well:
+
+```{r}
+#the data doesn't look multiplicative to me but let's give it a try
+EMHW=HoltWinters(powerTrainDaily,alpha=NULL,beta=NULL,gamma=NULL, seasonal="multi")
+plot(powerTrainDaily)
+p2<-predict(EMHW,n.ahead=96)
+lines(powerTestDaily, col=4)
+lines(p2,col=2)
+#actually not bad! not a huge difference between additive and mult. though
+```
+
+Actually not bad! I would say it's subjective whether the additive or multiplicative is a 'better' prediction, perhaps the additive since we don't have much reason to believe the data seasonality is actually multiplicative.
+
+There is likely a stochastic part of this time series as well. We'll remove the deterministic part (trend + seasonal pattern) and see if we can capture it.
+
+We can decompose the data to see it's trend, seasonal pattern and the remainder:
+
+```{r}
+library(ggplot2)
+autoplot(decompose(powerTrainDaily))
+```
+
+The trend is, to my eye, visually stationary. It's the seasonality that's going to explain this data for us.
+
+Also we see something interesting - a pattern in the remainder. Since we know this is electricity usage data we can guess that this is a second frequency; a weekend dip in use. This could be very important if we're predicting a weekend day, and even if not it will still inform our prediction by better modelizing the data.
+
+Let's move to ARIMA where we can try add that into our model (we could use the dshw() function as well, but ARIMA will work).
+
+First we can get a better idea of what parameters to try by differentiating:
+
+```{r}
+pTDdiff = powerTrainDaily %>% diff(lag=96)%>% diff(lag=7) %>%ggtsdisplay()
+
+```
+
+These values are way outside the statistical significance boundary with a strong peak at our 96 interval, and maybe another one cycle later at 192. I could spend all day fiddling around with different numbers of differentiations trying to get the ACF inside the boundary, but instead I'll let auto.arima try:
+
+```{r}
+auto.arima(powerTrainDaily)
+```
+Auto ARIMA picks an autoregressive model (q = 0) with a diffentiation p of 5 and a seasonal d value of 1. Let's see if we can beat those AIC/BIC numbers using that starting point:
+
+```{r}
+# this was my first attempt, it takes to long to run during the knit but the output is below:
+
+#fit = Arima(powerTrainDaily, order=c(5,0,0), seasonal=c(0,1,1))
+
+#Series: powerTrainDaily 
+#ARIMA(5,0,0)(0,1,1)[96] 
+
+#Coefficients:
+#         ar1     ar2     ar3      ar4     ar5     sma1
+#      0.7027  0.0794  0.1134  -0.2350  0.1318  -0.8674
+#s.e.  0.0151  0.0182  0.0181   0.0182  0.0151   0.0085
+#
+#sigma^2 estimated as 63.56:  log likelihood=-15145.24
+#AIC=30304.49   AICc=30304.51   BIC=30349.07
+```
+```{r}
+fit2 = Arima(powerTrainDaily, order=c(5,0,0), seasonal=c(0,1,2))
+prev = forecast(fit2, h=96)
+fit2
+```
+
+```{r}
+prev = forecast(fit2, h=96)
+autoplot(powerTrainDaily)+autolayer(prev$mean) + autolayer(powerTestDaily)
+```
+
+We were able to beat the auto ARIMA which is great, and this does indeed look like our best yet! It appears ARIMA(5,0,0)(0,1,2)96 is the best model we were able to find.
+
+
+Part 3: Advanced Forecasting Models
+-------------------------------------------------------------------------------
+
+An NNARpPk model might produce interesting results as well. 
+
+```{r}
+powerNN <- nnetar(powerTrainDaily)
+powerNN
+```
+
+the sigma^2 is significantly higher than our ARIMA model, which isn't surprising since a seasonal ARIMA model is more closely designed for our specific type of data.
+
+Likewise time series regression models are designed for 
+
+Part 4: Covariate Forecasting
+-------------------------------------------------------------------------------
+
+Recall elecdata is all of our data in a time series with frequency = 96. powerdata is just the complete rows (omitting the last day, whose power we want to eventually predict). And powertrain one day back further, so we can train on that and evaluate our predictions against powertest.
+
+All of these contain the column for Temperature as well, so we can use them again.
+
+```{r}
+colnames(powertrain)
+tsrm = tslm(formula = Power..kW.~Timestamp + Temp..C.., data=powertrain)
+summary(tsrm)
+```
+
+None of these look promising however, all the Pr(>|t|) values are too low. Again, not surprising as this data isn't really suited for this kind of analysis.
+
+
+```{r}
+fitcv = auto.arima(powerTrainDaily, xreg=powertrain[,3])
+prev2 = forecast(fitcv, h=96, xreg=powertest[,3])
+autoplot(powerTrainDaily)+autolayer(prev2$mean)+ autolayer(powerTestDaily)
+```
+
+These models are looking so close now it's hard to pick one! However we go back to what we know about the data itself: it stands to reason a prediction based on temperature is probably better than one without.
+
+However in this assignment we're submitting both, so in my excel sheet I'll have the Arima(powerTrainDaily, order=c(5,0,0), seasonal=c(0,1,2)) model for prediction on power only, and this fitcv = auto.arima(powerTrainDaily, xreg=powertrain[,3]) model for the prediction with.
+
+Now we'll run both of these models on the full datasets to create our predictions:
+
+```{r}
+finalfit = Arima(powerDaily, order=c(5,0,0), seasonal=c(0,1,2)) # train on all known values
+forecast1 = forecast(finalfit, h=96) # predict
+autoplot(powerDaily) + autolayer(forecast1$mean) # plot for sanity check
+```
