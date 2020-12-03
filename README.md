@@ -1,2 +1,2 @@
-# Continuous_Optimization
-A collection of functions and code exercises in R
+# Time Series Analysis
+A run through from basic time series analysis through ARIMA/SARIMA models
