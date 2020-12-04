@@ -5,7 +5,10 @@
 # A Tour of Time Series Approaches
 #### Spencer Murphy
 
-#### 10/24/2020
+### This code uses an excel file of real-world Electricity usage data
+### Feel free to message me if you'd like a copy to try for yourself (not my data to share :) )
+
+### Coming Soon: output images
 
 </div>
 
