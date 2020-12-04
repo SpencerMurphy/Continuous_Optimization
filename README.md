@@ -2,8 +2,7 @@
 
 <div class="fluid-row" id="header">
 
-# Spencer_Murphy_TS_exam
-
+# A Tour of Time Series Approaches
 #### Spencer Murphy
 
 #### 10/24/2020
